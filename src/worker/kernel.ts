@@ -142,7 +142,26 @@ class KernelManager {
   }
 
   postMessage(message: KernelManagerResponse) {
-    self.postMessage(message);
+    // TODO: Make this more elegant/performant
+    const transfer: any[] = [];
+    function getTypedArrays(x: any, depth: number) {
+      if (depth > 5 || !x) {
+        return;
+      }
+      if (ArrayBuffer.isView(x)) {
+        //transfer.push(x.buffer);
+        return;
+      }
+      for (const [key, value] of Object.entries(x)) {
+        if (ArrayBuffer.isView(value)) {
+          x[key] = (value as any).slice(); // webassembly memory cannot be transferred
+        }
+        getTypedArrays(value, depth + 1);
+      }
+    }
+    getTypedArrays(message, 0);
+    if (transfer.length > 0) console.warn(transfer);
+    self.postMessage(message, transfer);
   }
 
   log(kernel: WorkerKernel, ...args: string[]) {

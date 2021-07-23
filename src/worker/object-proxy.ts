@@ -66,6 +66,7 @@ function useFloatDecoder() {
  */
 export class ObjectProxyHost {
   readonly rootReferences = new Map<string, any>();
+  readonly rootReferencesIds = new Map<any, string>();
   readonly temporaryReferences = new Map<string, any>();
   readonly memory: AsyncMemory;
 
@@ -75,21 +76,34 @@ export class ObjectProxyHost {
     this.memory = memory;
   }
 
-  /** Creates a valid, random id for a given object */
+  /** Gets or creates a valid, random id for a given object */
   private getId(value: any) {
-    return uuidv4() + "-" + (typeof value === "function" ? "f" : "o");
+    const existingId = this.rootReferencesIds.get(value);
+    if (existingId) {
+      return {
+        id: existingId,
+        isNew: false,
+      };
+    } else {
+      return { id: uuidv4() + "-" + (typeof value === "function" ? "f" : "o"), isNew: true };
+    }
   }
 
   registerRootObject(value: any) {
     const id = this.getId(value);
-    this.rootReferences.set(id, value);
-    return id;
+    if (id.isNew) {
+      this.rootReferences.set(id.id, value);
+      this.rootReferencesIds.set(value, id.id);
+    }
+    return id.id;
   }
 
   registerTempObject(value: any) {
     const id = this.getId(value);
-    this.temporaryReferences.set(id, value);
-    return id;
+    if (id.isNew) {
+      this.temporaryReferences.set(id.id, value);
+    }
+    return id.id;
   }
 
   clearTemporary() {
@@ -192,8 +206,12 @@ export class ObjectProxyHost {
     if (typeof value === "object" && value !== null) {
       // Special cases
       if (value.id) return this.getObject(value.id);
-      if (value.value) return value.value;
       if (value.symbol) return KNOWN_SYMBOLS[value.symbol];
+      if (value.value) return value.value;
+      if (value.array) {
+        // Deserialize proxies in arrays
+        return value.array.map((v: any) => (v.id ? this.getObject(v.id) : v.value));
+      }
     }
     // It's a primitive
     return value;
@@ -203,8 +221,11 @@ export class ObjectProxyHost {
     if (message.type === "proxy-reflect") {
       try {
         const method = Reflect[message.method];
+        const target = this.getObject(message.target);
         const args = (message.arguments ?? []).map((v) => this.deserializePostMessage(v));
-        const result = (method as any)(this.getObject(message.target), ...args);
+        console.log([message.method, target, args]);
+        const result = (method as any)(target, ...args);
+        console.log([message.method, result]);
         // Write result to shared memory
         this.serializeMemory(result, memory);
       } catch (e) {
@@ -225,6 +246,7 @@ export class ObjectProxyHost {
 }
 
 export const ObjectId = Symbol("id");
+export const IsProxy = Symbol("is-proxy");
 /**
  * Allows this thread to access objects from another thread.
  * Must run on a worker thread.
@@ -251,7 +273,12 @@ export class ObjectProxyClient {
       return { id: value[ObjectId] };
     } else {
       // Maybe serialize simple functions https://stackoverflow.com/questions/1833588/javascript-clone-a-function
-      return { value: value }; // Might fail to get serialized
+      // Serialize proxies in arrays
+      if (Array.isArray(value) && value.find((v) => v[ObjectId] !== undefined)) {
+        return { array: value.map((v) => (v[ObjectId] !== undefined ? { id: v[ObjectId] } : { value: v })) };
+      } else {
+        return { value: value }; // Might fail to get serialized
+      }
     }
   }
 
@@ -324,16 +351,26 @@ export class ObjectProxyClient {
    * @returns The result of the operation, can be a primitive or a proxy
    */
   private proxyReflect(method: keyof typeof Reflect, targetId: string, args: any[]) {
+    // TODO: Rewrite this a bit
     try {
       this.memory.lock();
-      this.postMessage({
-        type: "proxy-reflect",
-        method: method,
-        target: targetId,
-        arguments: args.map((v) => this.serializePostMessage(v)),
-      });
-      this.memory.waitForSize();
-      const value = this.deserializeMemory(this.memory);
+      let value = undefined;
+      try {
+        this.postMessage({
+          type: "proxy-reflect",
+          method: method,
+          target: targetId,
+          arguments: args.map((v) => this.serializePostMessage(v)),
+        });
+        this.memory.waitForSize();
+        value = this.deserializeMemory(this.memory);
+      } catch (e) {
+        console.error({ method, targetId, args });
+        console.error(e);
+        try {
+          this.memory.unlockSize();
+        } catch (e) {}
+      }
 
       this.memory.unlockWorker();
       return value;
@@ -351,13 +388,31 @@ export class ObjectProxyClient {
   /**
    * Gets a proxy object for a given id
    */
-  getObjectProxy<T = any>(id: string): T {
+  getObjectProxy<T = any>(
+    id: string,
+    // TODO: Recursive exclusions (e.g. globalThis.window.window.window)
+    options?: {
+      exclude: {
+        props: Set<string>;
+        obj: any;
+      };
+    }
+  ): T {
     const client = this;
 
     return new Proxy(this.isFunction(id) ? function () {} : {}, {
       get(target, prop, receiver) {
         if (prop === ObjectId) {
           return id;
+        }
+        if (prop === IsProxy) {
+          return true;
+        }
+        // TODO: Remove this quick n dirty hack
+        if (prop === "setTimeout") {
+          return function (handler: any, timeout: any, ...args: any[]) {
+            return globalThis.setTimeout(handler, timeout, ...args);
+          };
         }
 
         // const value = Reflect.get(target, prop, receiver);
@@ -374,9 +429,7 @@ export class ObjectProxyClient {
             // receiver: the object the propery was gotten from. Is always the proxy or something inheriting from the proxy
             // target: the original object
 
-            // TODO: Or maybe thisArg[ObjectId] === receiver[ObjectId]?
-            const calledWithProxy = thisArg === receiver;
-
+            const calledWithProxy = thisArg[IsProxy];
             // return Reflect.apply(value, calledWithProxy ? target : thisArg, args);
             const value = client.proxyReflect("apply", calledWithProxy ? id : thisArg[ObjectId], args ?? []);
             return value;
@@ -443,27 +496,48 @@ export class ObjectProxyClient {
   /**
    * Wraps an object in a proxy that does not proxy certain properties
    */
-  wrapExcluderProxy<T extends object>(obj: T, underlyingObject: T, exclude: Set<string>): T {
+  wrapExcluderProxy<T extends object>(obj: T, underlyingObject: T, exclude: Set<string | Symbol>): T {
+    // This isn't the best solution, see https://github.com/gzuidhof/starboard-python/pull/5#issuecomment-885693105
+    // Maybe unwrap the proxy and create a new one which can do the job of both?
     return new Proxy<T>(obj, {
       get(target, prop, receiver) {
-        if (typeof prop === "string" && exclude.has(prop)) {
+        if (exclude.has(prop)) {
           target = underlyingObject;
+        }
+        if (prop === IsProxy) {
+          return true;
         }
 
         const value = Reflect.get(target, prop, receiver);
         if (typeof value !== "function") return value;
         return new Proxy(value, {
           apply(_, thisArg, args) {
-            const calledWithProxy = thisArg === receiver;
+            const calledWithProxy = thisArg[IsProxy];
             return Reflect.apply(value, calledWithProxy ? target : thisArg, args);
           },
         });
       },
+      set(target, prop, value, receiver) {
+        console.log("exc set");
+        return Reflect.set(target, prop, value, receiver);
+      },
+      ownKeys(target) {
+        console.log("excluder ownkeys");
+        return Reflect.ownKeys(target);
+      },
       has(target, prop) {
-        if (typeof prop === "string" && exclude.has(prop)) {
+        if (exclude.has(prop)) {
           target = underlyingObject;
         }
         return Reflect.has(target, prop);
+      },
+      defineProperty(target, prop, attributes) {
+        console.log("exc def");
+        return Reflect.defineProperty(target, prop, attributes);
+      },
+      deleteProperty(target, prop) {
+        console.log("exc del");
+        return Reflect.deleteProperty(target, prop);
       },
     });
   }

@@ -5,10 +5,11 @@
 export function patchMatplotlib(module: { runPythonSimple: (code: string) => any }) {
   module.runPythonSimple(`import matplotlib
 import matplotlib.pyplot
-from js import pyodide as jspyodide
+from js import document, window
 
 def create_root_element(self):
-  el = jspyodide.matplotlibHelpers.createElement("div");
+  el = document.createElement("div")
+  window.CURRENT_HTML_OUTPUT_ELEMENT.appendChild(el);
   return el
 
 matplotlib.backends.wasm_backend.FigureCanvasWasm.create_root_element = create_root_element

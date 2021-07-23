@@ -22,6 +22,8 @@ let CURRENT_HTML_OUTPUT_ELEMENT: HTMLElement | undefined = undefined;
 
 export function setGlobalPythonOutputElement(el: HTMLElement | undefined) {
   CURRENT_HTML_OUTPUT_ELEMENT = el;
+  // @ts-ignore
+  window["CURRENT_HTML_OUTPUT_ELEMENT"] = CURRENT_HTML_OUTPUT_ELEMENT;
 }
 
 /**

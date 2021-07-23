@@ -5,7 +5,6 @@
 import "../pyodide/pyodide";
 import type { Pyodide as PyodideType } from "../pyodide/typings";
 import type { KernelManagerType, WorkerKernel } from "./kernel";
-import { assertUnreachable } from "../util";
 import { PyodideWorkerOptions, PyodideWorkerResult } from "./worker-message";
 import { intArrayFromString } from "./emscripten-utils";
 
@@ -48,21 +47,20 @@ class PyodideKernel implements WorkerKernel {
       console.warn("Missing object proxy, some Pyodide functionality will be restricted");
     }
 
-    (self.pyodide as any).matplotlibHelpers = {
-      createElement: (tagName: string) => {
-        // TODO:
-        console.warn("Unsupported, plez implement");
-        /*
-          const elem = document.createElement(tagName);
-          if (!CURRENT_HTML_OUTPUT_ELEMENT) {
-            console.log("HTML output from pyodide but nowhere to put it, will append to body instead.");
-            document.querySelector("body")!.appendChild(elem);
+    if (self.manager.proxiedGlobalThis) {
+      (self as any).matplotlibHelpers = {
+        createElement: (tagName: string) => {
+          const elem = self.manager.proxiedGlobalThis.document.createElement(tagName);
+          if (!self.manager.proxiedGlobalThis.window.CURRENT_HTML_OUTPUT_ELEMENT) {
+            self.manager.log(this, "HTML output from pyodide but nowhere to put it, will append to body instead.");
+            self.manager.proxiedGlobalThis.document.querySelector("body")!.appendChild(elem);
           } else {
-            CURRENT_HTML_OUTPUT_ELEMENT.appendChild(elem);
+            self.manager.proxiedGlobalThis.window.CURRENT_HTML_OUTPUT_ELEMENT.appendChild(elem);
           }
-          return elem;*/
-      },
-    };
+          return elem;
+        },
+      };
+    }
 
     await self
       .loadPyodide({
@@ -143,8 +141,31 @@ class PyodideKernel implements WorkerKernel {
     // Special cases for the pyodide globalThis
     // In some cases, we'll end up with 4 nested proxies (this one, the kernel excluder proxy, the reflect proxy and the Pyodide js proxy)
     if (self.manager.proxy) {
-      //const noProxy = new Set<string>(["$$", "__name__", "__package__", "__path__", "__loader__"]);
-      //return self.manager.proxy.wrapExcluderProxy(obj, globalThis, noProxy);
+      const noProxy = new Set<string | symbol>([
+        "$$",
+        "__name__",
+        "__package__",
+        "__path__",
+        "__loader__",
+        "pyodide",
+
+        // Matplotlib hack
+        "matplotlibHelpers",
+
+        // TODO: Pyodide likes checking for lots of properties, like the .stack property to check if something is an error
+        // https://github.com/pyodide/pyodide/blob/c8436c33a7fbee13e1ded97c0bbdaa7d635f2745/src/core/jsproxy.c#L1631
+        "stack",
+        "get",
+        "set",
+        "has",
+        "size",
+        "length",
+        "then",
+        "includes",
+        "next",
+        Symbol.iterator,
+      ]);
+      return self.manager.proxy.wrapExcluderProxy(obj, globalThis, noProxy);
     }
 
     return obj;
