@@ -14,7 +14,7 @@ class KernelManager {
   asyncMemory: AsyncMemory | undefined;
   proxy: ObjectProxyClient | undefined;
 
-  proxiedGlobalThis: undefined | any;
+  proxiedGlobalThis: undefined | any; // TODO: remove this, since it's proxy-specific
 
   /**
    * Requests one line of user input

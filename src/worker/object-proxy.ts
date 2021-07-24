@@ -390,7 +390,32 @@ export class ObjectProxyClient {
    */
   getObjectProxy<T = any>(
     id: string,
+    // TODO: Take the ID and check if such a proxy already exists (weakmap)
+    // TODO: Every proxy has certain exclusions
+    // 1. properties to directly pass to the underlying object
+    // 2. functions that can be called on both threads (main or worker) (e.g. setTimeout with a main-thread-function as callback)
+    // 3. when returning another object-proxy, it will get its own list of exclusions
+    // TODO: fast paths for
+    // 4. functions that don't return anything (no need to block the worker until they're done executing)
+    // TODO: special paths for
+    // 5. callbacks (addEventListener)
+    /**
+     * Suggested API:
+     * registerExclusions(object) (main thread)
+     * --> creates an exclusion-list-object and gives it an ID. it then sends that to the web worker
+     * --> whenever that object gets an ID, we send the web worker the exclusion-list-id
+     * registerExclusions(type) (main thread)
+     * --> whenever an object with that type gets an ID, we tell the web worker which exclusion-list to use
+     * registerExclusions(id) (worker thread)
+     * --> whenever a proxy is created, we give it those exclusions
+     */
+    // TODO: When a property value is being obtained, call 'Object.getOwnPropertyDescriptor'
+    //       then we can figure out if it's a 'get' or 'value'. If it's just a 'value', then
+    //       we can return the value and tell the other side to cache it
+    // TODO: Regarding caching properties when they're accessed (functions are a prime target) (Object.getOwnPropertyDescriptor?)
     // TODO: Recursive exclusions (e.g. globalThis.window.window.window)
+    // TODO: add a finalizer to all temp objects with IDs on the main thread and tell the web worker to drop that ID?
+    //       or do it the other way around?
     options?: {
       exclude: {
         props: Set<string>;
